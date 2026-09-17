@@ -1,4 +1,4 @@
-import { supabaseAdmin } from "../../../../lib/supabaseAdmin";
+import { getSupabaseAdmin } from "../../../../lib/supabaseAdmin";
 
 // POST /api/auth/signup  { name, email, password }
 // Public — no auth required, this IS how someone gets their first login. Deliberately does
@@ -11,6 +11,7 @@ import { supabaseAdmin } from "../../../../lib/supabaseAdmin";
 // immediately usable — that's the tradeoff being made here: simplicity over verifying the
 // email address actually belongs to the person signing up.
 export async function POST(request) {
+  const supabaseAdmin = getSupabaseAdmin();
   const { name, email, password } = await request.json();
 
   if (!email || !password) {

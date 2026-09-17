@@ -63,10 +63,13 @@ or putting the app behind Vercel's password/SSO protection.
    | `SUPABASE_SERVICE_ROLE_KEY` | from Supabase dashboard → Project Settings → API → `service_role` secret — **server-only**, do not prefix with `NEXT_PUBLIC_` |
    | `CRON_SECRET` | any random string — protects the cron endpoint from being called by randoms |
    | `APIFREAKS_API_KEY` | free key from https://apifreaks.com/signup (Timezone Lookup API) — resolves airport codes not in the static list; server-only |
+   | `ANTHROPIC_API_KEY` | from console.anthropic.com — powers the floating chat assistant (`/api/chat`). Optional: the app runs fine without it, the assistant just shows an error if asked anything. Server-only, never `NEXT_PUBLIC_`. |
 3. Deploy. Vercel will also pick up `vercel.json`'s cron entry automatically and start hitting
-   `/api/cron/release-options` hourly once deployed (Cron Jobs are a Pro-plan feature on
-   Vercel — on the Hobby plan, either upgrade or trigger that same URL from any external
-   scheduler, e.g. a GitHub Actions workflow on a `schedule:` trigger).
+   `/api/cron/release-options` once a day (at 03:00 UTC) once deployed. Hobby-plan accounts are
+   limited to **daily** cron schedules — Vercel will flat-out reject the deploy if the schedule
+   is more frequent than that (this app originally shipped with an hourly schedule and hit
+   exactly that error). If you're on Pro and want tighter timing, e.g. hourly, change the
+   `"schedule"` string in `vercel.json` to `"0 * * * *"` before deploying.
 
 ## What's real vs. what's still a stand-in
 
@@ -145,3 +148,57 @@ or putting the app behind Vercel's password/SSO protection.
 - Finance (revenue/invoicing reporting) and Documents (file storage) from the reference design
   are not built — Finance needs a decision on what it should actually show, and Documents needs
   real file upload (Supabase Storage), not just a metadata register.
+- **Chat assistant** — a floating widget (bottom-left, on every tab) backed by `/api/chat` and
+  the Claude API. It can look up real flights, allotment totals, operator rates, and fleet
+  status via tool use, but can't change anything. Runs the query using the *asking user's own*
+  Supabase session token (not the service-role key), so RLS guarantees it never surfaces
+  anything that user couldn't already see in the app. **Conversation history is now persisted**
+  per user in the `chat_messages` table (migration `00013`) — reopening the widget or
+  refreshing the page picks up where you left off. Needs `ANTHROPIC_API_KEY` set to actually
+  respond (see above); without it, the widget still opens but shows a clear error rather than
+  failing silently.
+- **Scheduling engine** (Schedule → More → Scheduling engine) — a real assignment algorithm,
+  not a mock: define one or more route requirements (route, aircraft type or "any", days of
+  week, times, date range), and it expands every requirement into individual dated legs, then
+  greedily assigns each to whichever eligible aircraft has flown the fewest legs so far in
+  this run — spreading load across the fleet instead of dumping it all on one tail. It respects
+  the maintenance schedule (see below) and never double-books a tail already flying that day,
+  including against other requirements assigned earlier in the same run. This is honestly a
+  greedy heuristic processed in date order, not a global optimizer — it never goes back to
+  reshuffle an earlier pick to make a later requirement fit better. Same SCR-first,
+  confirm-to-create flow as everywhere else.
+- **Maintenance schedule** (Aircraft tab) — new UI over a table that already existed in the
+  schema but never had a screen: add/remove date-range blocks per aircraft with an optional
+  reason. The scheduling engine treats a grounded aircraft as ineligible for the whole span,
+  inclusive of both dates.
+- **The Schedule board is hand-rolled again, not vis-timeline.** We tried the library for a
+  stretch — it gave native pan/zoom/resize and fixed some real bugs — but every issue we hit
+  while integrating it (an async data-population race, the library silently reinterpreting our
+  UTC timestamps in the browser's local timezone, drag and resize firing the same callback and
+  getting confused for each other, three attempts to get right-click working) came from the
+  same root cause: this environment can't run a real browser to verify a third-party library's
+  undocumented behavior against. Code written in-house doesn't have that problem — when
+  something's wrong, the actual logic is readable directly, not something to guess at from
+  docs and GitHub issues. So we reverted, carrying forward everything learned in the process:
+  the day-boundary-aware lane assignment, the overnight-flight arrival fix, destination
+  coloring, ETD/ETA display, and — new since the vis-timeline detour — **maintenance blocks
+  now render as shaded regions directly on the grid**, and **rubber-band marquee select (drag
+  a box to select several flights) is back**, since that's something only our own code could
+  support in the first place. Panning is mouse-drag on empty space (both axes, only while the
+  button is held), zoom is the size slider in Period view, and right-click still drives both
+  "+ New flight here" and a flight's own menu. This is a big rebuild in one pass — test it
+  properly rather than assuming everything carried over perfectly.
+- **Excel roster importer** — Bulk Import now has an "Upload Excel roster" mode alongside the
+  existing CSV paste, parsing the actual per-aircraft weekly grid format (one sheet per tail,
+  flight number and route string in adjacent cells under each weekday column) via the `xlsx`
+  package (SheetJS), entirely client-side. This was built and verified against a real roster
+  file, not a guessed structure — critically, the week-block spacing in that file is **not**
+  uniform (usually 12 rows apart, but 10/11/13 rows around month or season boundaries), so
+  blocks are found dynamically by scanning for the row where a plain day-of-month number
+  actually appears, never assumed to repeat at a fixed interval. Dates are computed by
+  advancing a single anchor Monday 7 days per detected block — this was cross-checked against
+  every block's own stated day-of-month across all 10 real tail sheets with zero mismatches,
+  which is what "verified" means here, not just "ran once." Sheets that don't map to a tail in
+  your `resources` table (summary sheets, aircraft types outside the regular fleet) are skipped
+  and named in the preview, not silently dropped, and non-flight annotations in the grid
+  (tour-operator labels, NOTAMs) are counted and excluded rather than misread as flights.
